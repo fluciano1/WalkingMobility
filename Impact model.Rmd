@@ -1,0 +1,174 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#############################
+##       HOUSEKEEPING      ##
+#############################
+#Clear objects from R workspace 
+rm(list=ls())
+
+#Set working directory to local directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) 
+
+##############################
+###     LOAD LIBRARIES     ###
+##############################
+#Library pracma for moving average
+library(pracma)
+
+######################
+## DEFINE FUNCTIONS ##
+######################
+###
+###Function SurvHR: calculates survival at time t under a given hazard ratio, and given baseline survival at time t
+SurvHR <- function(S, HR){
+  #S: survival function values (point value or vector)
+  #HR: hazard ratio
+  
+  #For each time point, the cumulative hazard is given by Lambda(t) = ln(S(t))
+  Lambda <- -log(S)
+  
+  #Under proportional hazards assumption, H(t) = HR*H(t). Hence the alternative survival is given by:
+  S1 <- exp(-HR*Lambda)
+  
+  #Return
+  return(S1)
+}
+
+#############################################################
+###   MODEL  EFFECT OF STRINGENCY ON MORTALITY CURVES     ###
+#############################################################
+#Define parametres and their standard errors
+stringency <- seq(0, 100,1) #Define stringency range
+
+Beta1 <- -0.01202 #Beta1 (effect of stringency on walking, from mixed effect model)
+SEBeta1 <- 9.638*10^-05 #from mixed effect model
+
+walk0 <- 100 #%walking when stringency =0. By default, equals 100% 
+
+step0 <- 5039 #Baseline step count. Computed from Althoff et al 2017
+SEstep0 <- 105 # Computed from Althoff et al 2017
+
+gamma <- 0.12 #HR variation per 1 000 steps. From Jayedi et al 2022
+SEgamma <- 0.026  #From Jayedi et al 2022
+
+#Calculate HR 
+walk <- walk0*exp(Beta1*stringency)
+step <- step0*exp(Beta1*stringency)
+HR <- 1+(step0*(1-exp(Beta1*stringency)))/1000*gamma
+
+#Calculate standard error for HR by error propagation
+ddstep0 <- -gamma*(exp(stringency*Beta1)-1)*10^-3 #Partial derivative of HR with respect to step0
+ddBeta1 <- -(stringency*step0*gamma*exp(stringency*Beta1))*10^-3 #Partial derivative of HR with respect to Beta1
+ddgamma <- -(step0*(exp(stringency*Beta1)-1))*10^-3 #Partial derivative of HR with respect to gamma
+
+SEHR <- sqrt((ddstep0*SEstep0)^2+(ddBeta1*SEBeta1)^2+(ddgamma*SEgamma)^2) #Squared sum error propagation formula
+LowerCI <- HR-SEHR*1.96 #Lower bound of 95% confidence interval
+UpperCI <- HR+SEHR*1.96 #Upper bound of 95% confidence interval
+
+plot(HR, ylim=c(0, 1.6), xlab = "stringency", ylab="Modelled HR")
+lines(LowerCI)
+lines(UpperCI)
+
+#Export
+write.csv(HR, file="HR.csv")
+write.csv(LowerCI, file="HRLowerCI.csv")
+write.csv(UpperCI, file="HRUpperCI.csv")
+```
+
+```{r}
+################################################
+##         IMPORT BASELINE SURVIVAL DATA      ##
+################################################
+#Import data from Byberg 2009
+dfUnHi <- read.csv("UnHi.csv", sep=";") #unchanged high PA level
+dfUnHi <- dfUnHi[order(dfUnHi$Age.y.), ] #ascending sort by age
+
+dfUnLo <- read.csv("UnLo.csv", sep=";") #unchanged low PA level
+dfUnLo <- dfUnLo[order(dfUnLo$Age.y.), ] #sort ascending by time
+
+dfDecHiLo <- read.csv("DecHiLo.csv", sep=";") #decreased from high to low PA 
+dfDecHiLo <- dfDecHiLo[order(dfDecHiLo$Age.y.), ] #sort ascending by time
+
+#Smooth using a 7-day moving average
+dfUnHi$CumMortPerc <- movavg(dfUnHi$CumMortPerc, 7)
+dfUnLo$CumMortPerc <- movavg(dfUnLo$CumMortPerc, 7)
+dfDecHiLo$CumMortPerc <- movavg(dfDecHiLo$CumMortPerc, 7)
+
+#Convert percent cumulative mortality to fractional cumulativive mortality
+dfUnHi$CumMort <- dfUnHi$CumMortPerc/100
+dfUnLo$CumMort <- dfUnLo$CumMortPerc/100
+dfDecHiLo$CumMort <- dfDecHiLo$CumMortPerc/100
+
+#Calculate instant survival
+dfUnHi$S_t <- 1- dfUnHi$CumMort
+dfUnLo$S_t <- 1- dfUnLo$CumMort
+dfDecHiLo$S_t <- 1- dfDecHiLo$CumMort
+
+####################################
+## DRAW MODELLED SURVIVAL CURVES  ##
+####################################
+#Estimated hazard ratio at stringency index equal 20, 40, 60, 80
+HR20 <- 1+(step0*(1-exp(Beta1*20)))/1000*gamma
+HR40 <- 1+(step0*(1-exp(Beta1*40)))/1000*gamma
+HR60 <- 1+(step0*(1-exp(Beta1*60)))/1000*gamma
+HR80 <- 1+(step0*(1-exp(Beta1*80)))/1000*gamma
+
+#Estimated cumulative mortality
+C0 <-  1-SurvHR(dfUnLo$S_t, 1)
+C20 <- 1-SurvHR(dfUnLo$S_t, HR20)
+C40 <- 1-SurvHR(dfUnLo$S_t, HR40)
+C60 <- 1-SurvHR(dfUnLo$S_t, HR60)
+C80 <- 1-SurvHR(dfUnLo$S_t, HR80)
+
+#Visualization
+C0h <-  1-SurvHR(dfUnHi$S_t, 1)
+C20h <- 1-SurvHR(dfUnHi$S_t, HR20)
+C40h <- 1-SurvHR(dfUnHi$S_t, HR40)
+C60h <- 1-SurvHR(dfUnHi$S_t, HR60)
+C80h <- 1-SurvHR(dfUnHi$S_t, HR80)
+
+plot(dfUnLo$Age.y., C0, type="l", col="red", xlab="age (years)", ylab="cumulative mortality (frac)")
+lines(dfUnLo$Age.y., C20, lty=2, col="red")
+lines(dfUnLo$Age.y., C40, lty=2, col="red")
+lines(dfUnLo$Age.y., C60, lty=2, col="red")
+lines(dfUnLo$Age.y., C80, lty=2, col="red")
+
+lines(dfUnHi$Age.y., C0h, col="blue")
+lines(dfUnHi$Age.y., C20h, lty=2, col="blue")
+lines(dfUnHi$Age.y., C40h, lty=2, col="blue")
+lines(dfUnHi$Age.y., C60h, lty=2, col="blue")
+lines(dfUnHi$Age.y., C80h, lty=2, col="blue")
+
+lines(dfDecHiLo$Age.y, dfDecHiLo$CumMort, col="black")
+
+#Export data for figures
+edfHi <- as.data.frame(matrix(nrow=length(C0h), ncol = 6))
+names(edfHi) <- c("Age (years)", "Cum Mort HiPA", "Cum Mort S20", "Cum Mort S40", "Cum Mort S60", "Cum Mort S80")
+edfHi$`Age (years)` <- dfUnHi$Age.y
+edfHi$`Cum Mort HiPA`<- C0h
+edfHi$`Cum Mort S20` <- C20h
+edfHi$`Cum Mort S40` <- C40h
+edfHi$`Cum Mort S60` <- C60h
+edfHi$`Cum Mort S80` <- C80h
+write.table(edfHi, file="HiPA cumulative mortality modelled.csv")
+
+edfLo <- as.data.frame(matrix(nrow=length(C0), ncol = 6))
+names(edfLo) <- c("Age (years)", "Cum Mort LoPA", "Cum Mort S20", "Cum Mort S40", "Cum Mort S60", "Cum Mort S80")
+edfLo$`Age (years)` <- dfUnLo$Age.y
+edfLo$`Cum Mort LoPA`<- C0
+edfLo$`Cum Mort S20` <- C20
+edfLo$`Cum Mort S40` <- C40
+edfLo$`Cum Mort S60` <- C60
+edfLo$`Cum Mort S80` <- C80
+write.table(edfLo, file="LoPA cumulative mortality modelled.csv")
+
+edfHiLo <- as.data.frame(matrix(nrow=length(dfDecHiLo$Age.y), ncol = 2))
+names(edfLo) <- c("Age (years)", "Cum Mort HiLoPA")
+edfHiLo$`Age (years)` <- dfDecHiLo$Age.y
+edfHiLo$`Cum Mort HiLoPA` <- dfDecHiLo$CumMort
+write.table(edfHiLo, file="Dec HiLoPA cumulative mortality.csv")
+```
