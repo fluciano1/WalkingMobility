@@ -1,0 +1,287 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#############################
+##       HOUSEKEEPING      ##
+#############################
+#Clear objects from R workspace 
+rm(list=ls())
+
+#Set working directory to local directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) 
+
+###########################################
+###          IMPORT LIBRARIES           ###
+###########################################
+#Library tidyr - to use 'pivot_longer' function
+library(tidyr)
+
+#Library lubridate to manipulate dates
+library(lubridate)
+
+#Library pracma for smoothing
+library(pracma)
+
+#Library suncalc to calculate daylight
+library(suncalc)
+
+#Library Lme4 for mixed effect models
+library(lme4)
+
+#Library imputeTS to impute values on moving averages (functino: na_ma)
+library(imputeTS)
+
+#Libraryreadxl to read excel files
+library(readxl)
+
+#Library CoordinateCleaner to get capital city and country centroids coordinates from country code
+library(CoordinateCleaner)
+
+#Library performance for check_model function
+library(performance)
+
+###########################################
+###IMPORT DATASET APPLE MOBILITY REPORTS###
+###########################################
+#Load dataset
+AMR <- read.csv("applemobilitytrends-2022-02-02.csv")
+
+#Set date to long format
+AMR <- pivot_longer(AMR, cols=X2020.01.13:tail(names(AMR),1), names_to = 'date', values_to = 'value')
+
+#Set transportation type to long format
+AMR <- pivot_wider(AMR, names_from = transportation_type, values_from = value)
+
+#Fix date column: 
+#Remove "X" before date
+AMR$date <- substring(AMR$date, 2)
+
+#Convert date column to date type
+AMR$date <- as.Date(AMR$date, format="%Y.%m.%d")
+
+#Keep only rows which are not referred to sub regions
+AMR <- AMR[AMR$geo_type=="country/region",]
+
+###########################################
+###   IMPORT DATASET STRINGENCY INDEX    ##
+###########################################
+#Import dataset
+SI <- read.csv("covid-stringency-index.csv")
+
+#Rename "Date" to "date" for coherence with other datasets
+colnames(SI)[colnames(SI) == "Day"] <- "date"
+
+#Rename "Entity" to "region" for coherence with other datasets
+colnames(SI)[colnames(SI) == "Entity"] <- "region"
+
+###########################################
+###      MERGE DATASETS AMR AND SI       ##
+###########################################
+AMR<- merge(AMR, SI, by=c('region','date'))
+
+#Delete variable SI
+rm(SI)
+
+##################################################################
+###       ASSIGN CAPITAL CITY AND ITS LONGITUDE+LATITUDE       ###
+##################################################################
+#The library coordinateCleaner has a dataframe 'countryref'. Extract only useful columns from such dataframe, and call this subset 'df_countryref'
+df_countryref <- countryref[,c('iso3','capital', 'capital.lat','capital.lon','centroid.lat', 'centroid.lon')]
+
+#Rename "iso3" to "Code" for coherence with other datasets
+colnames(df_countryref)[colnames(df_countryref) == "iso3"] <- "Code"
+
+#Rename "capital" to "Capital" 
+colnames(df_countryref)[colnames(df_countryref) == "capital"] <- "Capital"
+
+#Rename "capital" to "Capital" 
+colnames(df_countryref)[colnames(df_countryref) == "capital"] <- "Capital"
+
+#Rename "capital.lat" to "Capital.lat" 
+colnames(df_countryref)[colnames(df_countryref) == "capital.lat"] <- "Capital.lat"
+
+#Rename "capital.lon" to "Capital.lon" 
+colnames(df_countryref)[colnames(df_countryref) == "capital.lon"] <- "Capital.lon"
+
+#Rename "centroid.lat" to "Centroid.lat" 
+colnames(df_countryref)[colnames(df_countryref) == "centroid.lat"] <- "Centroid.lat"
+
+#Rename "centroid.lon" to "Centroid.lon" 
+colnames(df_countryref)[colnames(df_countryref) == "centroid.lon"] <- "Centroid.lon"
+
+#countryref has many duplicate rows for each state. Drop duplicate rows with the same country code
+df_countryref <- df_countryref[!duplicated(df_countryref$Code),]
+
+#Merge AMR with df_countryref
+AMR <- merge(AMR, df_countryref, by='Code')  
+
+#Hong kong is not present in countryref. Hence, set the coordinates of Hong Kong Central district
+AMR[AMR$Code=="HKG",]$Capital.lat <- 22.302711
+AMR[AMR$Code=="HKG",]$Capital.lon <- 114.177216
+
+#Macao is not present in countryref. Hence, set the coordinates of Macao
+AMR[AMR$Code=="MAC",]$Capital.lat <- 22.210928
+AMR[AMR$Code=="MAC",]$Capital.lon <- 113.552971
+
+#Delete variable countryref
+rm(df_countryref)
+
+###########################################
+###       CALCULATE DAYLIGHT TIME       ###
+###########################################
+#Extract dataframe of dates, latitudes and longitudes for function getSunlightTimes
+data <- AMR[, c('date', 'Capital.lat', 'Capital.lon')]
+
+#Rename "Capital.lat" to "lat" to be a valid argument for function getSunlightTimes
+colnames(data)[colnames(data) == "Capital.lat"] <- "lat"
+
+#Rename "Capital.lon" to "lon" to be a valid argument for function getSunlightTimes
+colnames(data)[colnames(data) == "Capital.lon"] <- "lon"
+
+#Generate sundf dataframe
+sundf <- getSunlightTimes(data=data)
+
+#Calculate daylight duration and add to AMR dataframe
+AMR$Daylight <- as.numeric(sundf$sunset-sundf$sunrise)
+
+#Delete variables data, sundf
+rm(data)
+rm(sundf)
+
+#####################################################
+###  IMPORT DATASET ON WEATHER STATIONS AND MERGE  ##
+#####################################################
+#Import dataset NOAA codes
+NOAAcodes <- read_excel("NOAA codes for capitals.xlsx")
+
+#Merge
+AMR<- merge(AMR, NOAAcodes, by='Code')
+
+#Import average temperature dataset
+NOAAdf <- read.csv("NOAAdf_updated.csv", sep=",")
+
+#Merge
+names(NOAAdf)[names(NOAAdf)=="station"] <- "NOAA code full" #rename column
+AMR<- merge(AMR, NOAAdf, by=c('NOAA code full','date'))
+
+#Delete variables NOAAcodes, NOAAdf
+rm(NOAAcodes)
+rm(NOAAdf)
+
+###########################################
+###          SMOOTH TIME SERIES          ##
+###########################################
+#Smooth walking and stringency index time series with a 7-day moving average
+for (countrycode in unique(AMR$Code)){ 
+  #Iterate for each country
+  #Impute missing values with moving average method
+  AMR[AMR$Code==countrycode,]$walking <- na_ma(x = AMR[AMR$Code==countrycode,]$walking, k=7)
+  AMR[AMR$Code==countrycode,]$stringency_index <-na_ma(x = AMR[AMR$Code==countrycode,]$stringency_index, k=7)
+
+  #Smooth walking and stringency with a 7-day moving average
+  AMR[AMR$Code==countrycode,]$walking <- movavg(AMR[AMR$Code==countrycode,]$walking, 7)
+  AMR[AMR$Code==countrycode,]$stringency_index <- movavg(AMR[AMR$Code==countrycode,]$stringency_index, 7)
+
+}
+
+####################################################
+###             SELECT RANGE OF DATES             ##
+####################################################
+#Data from 21st Jan 2020 to 21st Jan 2022 will be analyzed
+AMR <- AMR[AMR$date <= as.Date("2022.01.21",  format="%Y.%m.%d"),]
+
+###########################################
+###          EXPORT AMR DATASET          ##
+###########################################
+#Export AMR as csv
+write.csv2(AMR, file="dfAMR_T_prec.csv")
+```
+```{r}
+############################################################
+###               CENTER COVARIATES ON MEAN               ##
+############################################################
+#Create variables for centred temperature and daylight
+AMR$meanTavg <- NA
+AMR$meanDaylight <- NA
+AMR$meanPrec <- NA
+
+#Calculate mean of each covariate for each country
+for (c in unique(AMR$Code)){
+  #Mean temperature
+  meanTavg <- mean(AMR[AMR$Code==c,]$AvrTemp_CelsiusDecimals)
+  AMR$meanTavg[AMR$Code==c] <- meanTavg
+  
+  #Mean daylight
+  meanDaylight<- mean(AMR[AMR$Code==c,]$Daylight)
+  AMR$meanDaylight[AMR$Code==c] <- meanDaylight
+  
+  #Mean precipitation
+  meanPrec <- mean(AMR[AMR$Code==c,]$Prec_mm)
+  AMR$meanPrec[AMR$Code==c] <- meanPrec
+  
+}
+
+#Center each covariate on mean
+AMR$AvrTemp_CelsiusDecimals_Centred <- AMR$AvrTemp_CelsiusDecimals-AMR$meanTavg
+AMR$Daylight_Centred <- AMR$Daylight-AMR$meanDaylight
+AMR$Prec_mm_Centred <- AMR$Prec_mm-AMR$meanPrec
+
+############################################################
+###       REGRESSION WITH CENTRED COVARIATES              ##
+############################################################
+#Model 1c: mixed effect model for walking - random intercept with centred covariates
+lmm1c <- lmer(walking ~ stringency_index + Daylight_Centred + AvrTemp_CelsiusDecimals_Centred + (1|Code), data=AMR)
+#summary(lmm1c)
+#coef(lmm1c)
+#confint(lmm1c)
+#r2(lmm1c)
+
+#Check model
+#check_singularity(lmm1c)
+plot(check_collinearity(lmm1c))
+plot(check_normality(lmm1c))
+plot(check_heteroscedasticity(lmm1c))
+```
+```{r}
+#Model 2c: mixed effect model for ln(walking) - random intercept with centred covariates
+lmm2c <- lmer(log(walking) ~ stringency_index + Daylight_Centred + AvrTemp_CelsiusDecimals_Centred + (1|Code), data=AMR)
+summary(lmm2c)
+#coef(lmm2c)
+confint(lmm2c)
+#r2(lmm2c)
+
+#Check model
+check_singularity(lmm2c)
+plot(check_collinearity(lmm2c))
+plot(check_normality(lmm2c))
+plot(check_heteroscedasticity(lmm2c))
+```
+
+```{r}
+#Model 2: mixed effect model for ln(walking) - random intercept UNADJUSTED for covariates
+lmm2 <- lmer(log(walking) ~ stringency_index + (1|Code), data=AMR)
+summary(lmm2)
+#coef(lmm2c)
+confint(lmm2)
+#r2(lmm2c)
+```
+
+```{r}
+#Model 3: mixed effect model for ln(walking) - random intercept with centred covariates, adjusting also for precipitations
+lmm3c <- lmer(log(walking) ~ stringency_index + Daylight_Centred + AvrTemp_CelsiusDecimals_Centred + Prec_mm_Centred + (1|Code), data=AMR)
+summary(lmm3c)
+#coef(lmm2c)
+confint(lmm3c)
+#r2(lmm2c)
+
+#Check model
+check_singularity(lmm3c)
+plot(check_collinearity(lmm3c))
+plot(check_normality(lmm3c))
+plot(check_heteroscedasticity(lmm3c))
+```
+
+
